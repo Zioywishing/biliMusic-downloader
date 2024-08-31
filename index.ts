@@ -5,7 +5,7 @@ import fs from "fs";
 import path from "path";
 // @ts-ignore
 import { exec } from "child_process";
-import cookie from "./cookie.ts"
+import cookie from "./cookie.ts";
 
 const headers = {
 	"accept": "application/json, text/plain, */*",
@@ -27,10 +27,10 @@ const headers = {
 };
 
 const sanitizeFileName = (name: string) => {
-	return name.replace(/[<>:"/\\|?*]+/g, '_');
+	return name.replace(/[<>:"/\\|?*]+/g, "_");
 };
 
-const getVideoInfo = async (bvid: string): Promise<{ cid: any; partName: any; }[]> => {
+const getVideoInfo = async (bvid: string): Promise<{ cid: any; partName: any }[]> => {
 	const res = await axios.get(`https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`);
 	return res.data.data.map((v: { cid: any; part: any }) => ({
 		cid: v.cid,
@@ -52,32 +52,24 @@ const getAudioUrl = async (bvid: string, cid: string) => {
 	return response.data.data.dash.audio[0].baseUrl;
 };
 
-const getFile = async (url: string, filePath: string) => {
+const getFileStream = async url => {
 	const response = await axios({
 		method: "get",
 		url: url,
 		responseType: "stream",
 		headers
 	});
+	return response.data;
+};
 
+const convertToMp3Stream = (inputStream, outputPath) => {
 	// Ensure the directory exists
-	const dir = path.dirname(filePath);
+	const dir = path.dirname(outputPath);
 	if (!fs.existsSync(dir)) {
 		fs.mkdirSync(dir, { recursive: true });
 	}
-
-	const writer = fs.createWriteStream(filePath);
-	response.data.pipe(writer);
-
 	return new Promise((resolve, reject) => {
-		writer.on("finish", resolve);
-		writer.on("error", reject);
-	});
-};
-
-const convertToMp3 = (inputPath: string, outputPath: string) => {
-	return new Promise((resolve, reject) => {
-		exec(`ffmpeg -i "${inputPath}" -q:a 0 "${outputPath}"`, (error, stdout, stderr) => {
+		const ffmpegProcess = exec(`ffmpeg -i pipe:0 -q:a 0 "${outputPath}"`, (error, stdout, stderr) => {
 			if (error) {
 				reject(`Error: ${error.message}`);
 				return;
@@ -87,18 +79,21 @@ const convertToMp3 = (inputPath: string, outputPath: string) => {
 			}
 			resolve(stdout);
 		});
+		inputStream.pipe(ffmpegProcess.stdin);
 	});
 };
 
 (async () => {
-	const bvid = "BV1JmWSetECH";
-	const { cid, partName } = (await getVideoInfo(bvid))[0];
-	const audioUrl = await getAudioUrl(bvid, cid);
-	const filePath = path.resolve(`./download/${bvid}`, `${partName}.m4s`);
-	await getFile(audioUrl, filePath);
-	console.log("文件下载完成");
-
-	const mp3Path = path.resolve(`./download/${bvid}`, `${partName}.mp3`);
-	await convertToMp3(filePath, mp3Path);
-	console.log("转换完成");
+	const bvid = "BV1DR4y1R7ni";
+	const infoList = await getVideoInfo(bvid);
+	for (let info of infoList) {
+		(async () => {
+			const { cid, partName } = info;
+			const audioUrl = await getAudioUrl(bvid, cid);
+			const audioStream = await getFileStream(audioUrl);
+			const mp3Path = path.resolve(`./download/${bvid}`, `${partName}.mp3`);
+			await convertToMp3Stream(audioStream, mp3Path);
+			console.log(`下载${partName}完成`);
+		})();
+	}
 })();
