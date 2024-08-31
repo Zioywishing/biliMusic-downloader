@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // MiaoConfig 配置文件结构体
@@ -199,22 +200,44 @@ func main() {
 		panic(err)
 	}
 
+	var wg sync.WaitGroup
+	ch := make(chan error, len(infoList)) // 用于传递错误信息的channel
+
 	for _, info := range infoList {
-		audioUrl, err := getAudioUrl(bvid, info.Cid, headers)
-		if err != nil {
-			panic(err)
-		}
+		wg.Add(1)
+		go func(info VideoInfo) {
+			defer wg.Done()
+			audioUrl, err := getAudioUrl(bvid, info.Cid, headers)
+			if err != nil {
+				ch <- fmt.Errorf("获取音频地址失败: %w", err)
+				return
+			}
 
-		audioStream, err := getFileStream(audioUrl, headers)
-		if err != nil {
-			panic(err)
-		}
-		defer audioStream.Close()
+			audioStream, err := getFileStream(audioUrl, headers)
+			if err != nil {
+				ch <- fmt.Errorf("获取音频流失败: %w", err)
+				return
+			}
+			defer audioStream.Close()
 
-		mp3Path := filepath.Join("./download", bvid, fmt.Sprintf("%s.mp3", info.PartName))
-		if err := convertToMp3Stream(audioStream, mp3Path); err != nil {
-			panic(err)
+			mp3Path := filepath.Join("./download", bvid, fmt.Sprintf("%s.mp3", info.PartName))
+			if err := convertToMp3Stream(audioStream, mp3Path); err != nil {
+				ch <- fmt.Errorf("转换音频失败: %w", err)
+				return
+			}
+			fmt.Printf("下载%s完成\n", info.PartName)
+		}(info)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// 处理错误信息
+	for err := range ch {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "下载发生错误: %v\n", err)
 		}
-		fmt.Printf("下载%s完成\n", info.PartName)
 	}
 }
