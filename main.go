@@ -46,7 +46,7 @@ func getHeaders(config *MiaoConfig) map[string]string {
 		"origin":             "https://www.bilibili.com",
 		"pragma":             "no-cache",
 		"priority":           "u=1, i",
-		"referer":            "https://www.bilibili.com/video/BV1wg4y127mJ/?spm_id_from=333.337.search-card.all.click&vd_source=f4b11eff4d5b11ae41cb4e0ca94e674b",
+		"referer":            "https://www.bilibili.com/video",
 		"sec-ch-ua":          "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Microsoft Edge\";v=\"128\"",
 		"sec-ch-ua-mobile":   "?0",
 		"sec-ch-ua-platform": "\"Windows\"",
@@ -191,7 +191,7 @@ func main() {
 
 	// 从控制台读取bvid
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("请输入BVID: ")
+	fmt.Print("待下载音频BV号: ")
 	bvid, _ := reader.ReadString('\n')
 	bvid = strings.TrimSpace(bvid)
 
@@ -202,31 +202,50 @@ func main() {
 
 	var wg sync.WaitGroup
 	ch := make(chan error, len(infoList)) // 用于传递错误信息的channel
+	const maxAsync = 999
+	var asyncCount = 0
+	var downloadMp3 = func(info VideoInfo, index int) {
+		const maxRetries = 8
+		var err error
+		var audioUrl string
+		var audioStream io.ReadCloser
 
-	for _, info := range infoList {
-		wg.Add(1)
-		go func(info VideoInfo) {
-			defer wg.Done()
-			audioUrl, err := getAudioUrl(bvid, info.Cid, headers)
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			audioUrl, err = getAudioUrl(bvid, info.Cid, headers)
 			if err != nil {
-				ch <- fmt.Errorf("获取音频地址失败: %w", err)
-				return
+				fmt.Printf("获取音频地址失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
+				continue
 			}
 
-			audioStream, err := getFileStream(audioUrl, headers)
+			audioStream, err = getFileStream(audioUrl, headers)
 			if err != nil {
-				ch <- fmt.Errorf("获取音频流失败: %w", err)
-				return
+				fmt.Printf("获取音频流失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
+				continue
 			}
 			defer audioStream.Close()
 
-			mp3Path := filepath.Join("./download", bvid, fmt.Sprintf("%s.mp3", info.PartName))
-			if err := convertToMp3Stream(audioStream, mp3Path); err != nil {
-				ch <- fmt.Errorf("转换音频失败: %w", err)
-				return
+			mp3Path := filepath.Join("./download", fmt.Sprintf("%s-%d-%s.mp3", bvid, index, info.PartName))
+			if err = convertToMp3Stream(audioStream, mp3Path); err != nil {
+				fmt.Printf("转换音频失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
+				continue
 			}
+
 			fmt.Printf("下载%s完成\n", info.PartName)
-		}(info)
+			wg.Done()
+			return
+		}
+		wg.Done()
+		ch <- fmt.Errorf("下载%s失败: %w", info.PartName, err)
+	}
+
+	for index, info := range infoList {
+		wg.Add(1)
+		asyncCount += 1
+		go downloadMp3(info, index+1)
+		if asyncCount == maxAsync {
+			wg.Wait()
+			asyncCount = 0
+		}
 	}
 
 	go func() {
