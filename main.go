@@ -16,6 +16,8 @@ import (
 	"sync"
 )
 
+const downloadMode = "mp4"
+
 // MiaoConfig 配置文件结构体
 type MiaoConfig struct {
 	Cookie string `json:"cookie"`
@@ -107,12 +109,12 @@ func getVideoInfo(bvid string, headers map[string]string) ([]VideoInfo, error) {
 	return infoList, nil
 }
 
-// getAudioUrl 获取音频地址
-func getAudioUrl(bvid string, cid string, headers map[string]string) (string, error) {
+// getStreamUrl 获取流地址
+func getStreamUrl(bvid string, cid string, headers map[string]string) (string, string, error) {
 	url := "https://api.bilibili.com/x/player/wbi/playurl"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	q := req.URL.Query()
@@ -129,7 +131,7 @@ func getAudioUrl(bvid string, cid string, headers map[string]string) (string, er
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
@@ -156,16 +158,18 @@ func getAudioUrl(bvid string, cid string, headers map[string]string) (string, er
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return "", "", err
 	}
 	// fmt.Printf("",result.Data.Dash.Video[0].Id, result.Data.Dash.Video[0].Width, result.Data.Dash.Video[0].Height)
 	// return result.Data.Dash.Video[0].BaseUrl, nil
 
+	var AudioUrl = result.Data.Dash.Audio[0].BaseUrl
+	var VideoUrl = result.Data.Dash.Video[0].BaseUrl
 	// 优先返回hi-res的数据
 	if result.Data.Dash.Flac.Audio.BaseUrl != "" {
-		return result.Data.Dash.Flac.Audio.BaseUrl, nil
+		AudioUrl = result.Data.Dash.Flac.Audio.BaseUrl
 	}
-	return result.Data.Dash.Audio[0].BaseUrl, nil
+	return AudioUrl, VideoUrl, nil
 }
 
 // getFileStream 获取文件流
@@ -194,9 +198,36 @@ func convertToMp3Stream(inputStream io.Reader, outputPath string) error {
 		return err
 	}
 
-	cmd := exec.Command("ffmpeg", "-i", "pipe:0", "-q:a", "0", outputPath)
+	cmd := exec.Command("ffmpeg", "-i", "pipe:0", "-q:a", "0", "-f", "mp3", outputPath)
 	cmd.Stdin = inputStream
 	return cmd.Run()
+}
+
+func convertToVideoStream(videoStream io.Reader, audioPath string, outputPath string) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return err
+	}
+
+	// fmt.Print(audioPath)
+
+	cmd := exec.Command("ffmpeg",
+		"-i", "pipe:0",
+		"-i", audioPath,
+		"-c:v", "copy",
+		// "-c:v", "libvpx-vp9",
+		// "-c:a", "aac",
+		// "-map", "0:v:0",
+		// "-map", "0:a:0",
+		"-f", "mp4", outputPath)
+	cmd.Stdin = videoStream
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println("Error running ffmpeg:", err)
+		return err
+	}
+
+	return nil
 }
 
 func main() {
@@ -228,10 +259,12 @@ func main() {
 		const maxRetries = 8
 		var err error
 		var audioUrl string
+		var videoUrl string
 		var audioStream io.ReadCloser
+		var videoStream io.ReadCloser
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
-			audioUrl, err = getAudioUrl(bvid, info.Cid, headers)
+			audioUrl, videoUrl, err = getStreamUrl(bvid, info.Cid, headers)
 			if err != nil {
 				fmt.Printf("获取音频地址失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
 				continue
@@ -244,10 +277,25 @@ func main() {
 			}
 			defer audioStream.Close()
 
-			mp3Path := filepath.Join("./download", fmt.Sprintf("%s-%d-%s.mp3", bvid, index, info.PartName))
-			if err = convertToMp3Stream(audioStream, mp3Path); err != nil {
+			audioPath := filepath.Join("./download", fmt.Sprintf("%s-%d-%s.mp3", bvid, index, info.PartName))
+			if err = convertToMp3Stream(audioStream, audioPath); err != nil {
 				fmt.Printf("转换音频失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
 				continue
+			}
+
+			if downloadMode == "mp4" {
+				videoStream, err = getFileStream(videoUrl, headers)
+				if err != nil {
+					fmt.Printf("获取视频流失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
+					continue
+				}
+				defer videoStream.Close()
+
+				videoPath := filepath.Join("./download", fmt.Sprintf("%s-%d-%s.mp4", bvid, index, info.PartName))
+				if err = convertToVideoStream(videoStream, audioPath, videoPath); err != nil {
+					fmt.Printf("转换视频失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
+					continue
+				}
 			}
 
 			fmt.Printf("下载%s完成\n", info.PartName)
