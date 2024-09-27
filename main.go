@@ -119,6 +119,7 @@ func getAudioUrl(bvid string, cid string, headers map[string]string) (string, er
 	q.Add("fnval", "4048")
 	q.Add("bvid", bvid)
 	q.Add("cid", cid)
+	q.Add("qn", "116")
 	req.URL.RawQuery = q.Encode()
 
 	for k, v := range headers {
@@ -135,16 +136,35 @@ func getAudioUrl(bvid string, cid string, headers map[string]string) (string, er
 	var result struct {
 		Data struct {
 			Dash struct {
+				Video []struct {
+					BaseUrl string `json:"baseUrl"`
+					Id      int    `json:"id"`
+					Width   int    `json:"width"`
+					Height  int    `json:"Height"`
+				} `json:"video"`
 				Audio []struct {
 					BaseUrl string `json:"baseUrl"`
+					Id      int    `json:"id"`
 				} `json:"audio"`
+				Flac struct {
+					Audio struct {
+						BaseUrl string `json:"baseUrl"`
+						Id      int    `json:"id"`
+					} `json:"audio"`
+				} `json:"flac"`
 			} `json:"dash"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
+	// fmt.Printf("",result.Data.Dash.Video[0].Id, result.Data.Dash.Video[0].Width, result.Data.Dash.Video[0].Height)
+	// return result.Data.Dash.Video[0].BaseUrl, nil
 
+	// 优先返回hi-res的数据
+	if result.Data.Dash.Flac.Audio.BaseUrl != "" {
+		return result.Data.Dash.Flac.Audio.BaseUrl, nil
+	}
 	return result.Data.Dash.Audio[0].BaseUrl, nil
 }
 
