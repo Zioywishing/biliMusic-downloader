@@ -16,11 +16,11 @@ import (
 	"sync"
 )
 
-const downloadMode = "mp4"
-
 // MiaoConfig 配置文件结构体
 type MiaoConfig struct {
-	Cookie string `json:"cookie"`
+	Cookie        string `json:"cookie"`
+	DownloadVideo bool   `json:"downloadVideo"`
+	VideoEncoder  string `json:"videoEncoder"`
 }
 
 // 读取配置文件
@@ -160,8 +160,6 @@ func getStreamUrl(bvid string, cid string, headers map[string]string) (string, s
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", "", err
 	}
-	// fmt.Printf("",result.Data.Dash.Video[0].Id, result.Data.Dash.Video[0].Width, result.Data.Dash.Video[0].Height)
-	// return result.Data.Dash.Video[0].BaseUrl, nil
 
 	var AudioUrl = result.Data.Dash.Audio[0].BaseUrl
 	var VideoUrl = result.Data.Dash.Video[0].BaseUrl
@@ -203,7 +201,7 @@ func convertToMp3Stream(inputStream io.Reader, outputPath string) error {
 	return cmd.Run()
 }
 
-func convertToVideoStream(videoStream io.Reader, audioPath string, outputPath string) error {
+func convertToVideoStream(videoStream io.Reader, audioPath string, outputPath string, config MiaoConfig) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return err
 	}
@@ -213,11 +211,7 @@ func convertToVideoStream(videoStream io.Reader, audioPath string, outputPath st
 	cmd := exec.Command("ffmpeg",
 		"-i", "pipe:0",
 		"-i", audioPath,
-		"-c:v", "copy",
-		// "-c:v", "libvpx-vp9",
-		// "-c:a", "aac",
-		// "-map", "0:v:0",
-		// "-map", "0:a:0",
+		"-c:v", config.VideoEncoder,
 		"-f", "mp4", outputPath)
 	cmd.Stdin = videoStream
 	cmd.Stdout = os.Stdout
@@ -230,6 +224,14 @@ func convertToVideoStream(videoStream io.Reader, audioPath string, outputPath st
 	return nil
 }
 
+func logConfig(config *MiaoConfig) {
+	mode := "audio"
+	if config.DownloadVideo {
+		mode = fmt.Sprintf("audio+video \nvideo encoder: %s", config.VideoEncoder)
+	}
+	fmt.Printf("mode: %s \n", mode)
+}
+
 func main() {
 	// 读取配置文件
 	config, err := readConfig("./miaoConfig.json")
@@ -237,12 +239,14 @@ func main() {
 		panic(err)
 	}
 
+	logConfig(config)
+
 	// 获取请求头
 	headers := getHeaders(config)
 
 	// 从控制台读取bvid
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("待下载音频BV号: ")
+	fmt.Print("bvid: ")
 	bvid, _ := reader.ReadString('\n')
 	bvid = strings.TrimSpace(bvid)
 
@@ -283,7 +287,7 @@ func main() {
 				continue
 			}
 
-			if downloadMode == "mp4" {
+			if config.DownloadVideo {
 				videoStream, err = getFileStream(videoUrl, headers)
 				if err != nil {
 					fmt.Printf("获取视频流失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
@@ -292,7 +296,7 @@ func main() {
 				defer videoStream.Close()
 
 				videoPath := filepath.Join("./download", fmt.Sprintf("%s-%d-%s.mp4", bvid, index, info.PartName))
-				if err = convertToVideoStream(videoStream, audioPath, videoPath); err != nil {
+				if err = convertToVideoStream(videoStream, audioPath, videoPath, *config); err != nil {
 					fmt.Printf("转换视频失败 (尝试 %d/%d): %v\n", attempt, maxRetries, err)
 					continue
 				}
